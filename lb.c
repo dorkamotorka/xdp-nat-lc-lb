@@ -81,7 +81,7 @@ static __always_inline void log_fib_error(int rc) {
   switch (rc) {
   case BPF_FIB_LKUP_RET_BLACKHOLE:
     bpf_printk("FIB lookup failed: BLACKHOLE route. Check 'ip route' – the "
-              "destination may have a blackhole rule.");
+               "destination may have a blackhole rule.");
     break;
   case BPF_FIB_LKUP_RET_UNREACHABLE:
     bpf_printk("FIB lookup failed: UNREACHABLE route. Kernel routing table "
@@ -204,37 +204,6 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
   return bpf_fib_lookup(ctx, fib, sizeof(*fib), 0);
 }
 
-// Helper: build the conntrack key for a given (lb_ip, backend_ip,
-// client_src_port, dest_port).
-
-static __always_inline struct five_tuple_t
-make_ct_key(__u32 lb_ip, __u32 backend_ip,
-            __u16 client_src_port, __u16 dest_port) {
-  struct five_tuple_t k = {};
-  k.src_ip   = lb_ip;
-  k.dst_ip   = backend_ip;
-  k.src_port = client_src_port;
-  k.dst_port = dest_port;
-  k.protocol = IPPROTO_TCP;
-  return k;
-}
-
-// Helper: build the backendtrack key for the client-facing direction
-
-static __always_inline struct five_tuple_t
-make_bt_key(__u32 client_ip, __u32 lb_ip,
-            __u16 client_src_port, __u16 dest_port) {
-  struct five_tuple_t k = {};
-  k.src_ip   = client_ip;
-  k.dst_ip   = lb_ip;
-  k.src_port = client_src_port;
-  k.dst_port = dest_port;
-  k.protocol = IPPROTO_TCP;
-  return k;
-}
-
-// XDP program
-
 SEC("xdp")
 int xdp_load_balancer(struct xdp_md *ctx) {
   void *data_end = (void *)(long)ctx->data_end;
@@ -326,9 +295,12 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       bpf_map_delete_elem(&conntrack, &ct_key_from_backend);
 
       // Delete backendtrack entry (key is client-facing direction)
-      struct five_tuple_t bt_key = make_bt_key(ct->ip, ip->daddr,
-                                               tcp->dest,  // client src port
-                                               tcp->source);
+      struct five_tuple_t bt_key = {};
+      bt_key.src_ip   = ct->ip;
+      bt_key.dst_ip   = ip->daddr;
+      bt_key.src_port = tcp->dest;
+      bt_key.dst_port = tcp->source;
+      bt_key.protocol = IPPROTO_TCP;
       bpf_map_delete_elem(&backendtrack, &bt_key);
 
       bpf_printk("connection deleted. (Backend path) Backend %pI4 conns=%d",
@@ -351,11 +323,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   } else {
     // connection not found, hence packet is from client
     // Build the client-facing five-tuple for backendtrack
-    struct five_tuple_t bt_key = make_bt_key(ip->saddr, ip->daddr,
-                                             tcp->source, tcp->dest);
+    struct five_tuple_t bt_key = {};
+    bt_key.src_ip   = ip->saddr;
+    bt_key.dst_ip   = ip->daddr;
+    bt_key.src_port = tcp->source;
+    bt_key.dst_port = tcp->dest;
+    bt_key.protocol = IPPROTO_TCP;
 
-    struct five_tuple_t *ct_key_ptr =
-        bpf_map_lookup_elem(&backendtrack, &bt_key);
+    struct five_tuple_t *ct_key_ptr = bpf_map_lookup_elem(&backendtrack, &bt_key);
 
     struct endpoint *b;
     struct five_tuple_t ct_key = {};
@@ -382,7 +357,12 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         return XDP_ABORTED;
 
       // Build the conntrack key to store new connection(backend ip and state)
-      ct_key = make_ct_key(ip->daddr, b->ip, tcp->source, tcp->dest);
+      struct five_tuple_t ct_key = {};
+      ct_key.src_ip   = ip->daddr;
+      ct_key.dst_ip   = b->ip;
+      ct_key.src_port = tcp->source;
+      ct_key.dst_port = tcp->dest;
+      ct_key.protocol = IPPROTO_TCP;
 
       // store connection (state=0: SYN seen, not yet established)
       struct conn_meta meta = {};
