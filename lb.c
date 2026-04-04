@@ -307,9 +307,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       bt_key.dst_port = tcp->source;
       bt_key.protocol = IPPROTO_TCP;
       bpf_map_delete_elem(&backendtrack, &bt_key);
-
-      bpf_printk("connection deleted. (Backend path) Backend %pI4 conns=%d",
-                 &b->ip, nb.conns);
     }
 
     // Perform a FIB lookup
@@ -324,8 +321,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     ip->daddr = ct->ip;
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
   } else {
-    // connection not found, hence packet is from client
-    // Build the client-facing five-tuple for backendtrack
+    bpf_printk("Packet from backend because the connection exists - "
+               "redirecting back to client");
+
     struct five_tuple_t bt_key = {};
     bt_key.src_ip   = ip->saddr;
     bt_key.dst_ip   = ip->daddr;
@@ -404,8 +402,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         struct endpoint nb = *b;
         nb.conns += 1;
         bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
-        bpf_printk("conn established : Backend %pI4 conns=%d",
-                   &b->ip, nb.conns);
         ct = bpf_map_lookup_elem(&conntrack, &ct_key);
         if (!ct)
           return XDP_ABORTED;
@@ -439,9 +435,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         // delete conntrack and backendtrack entries
         bpf_map_delete_elem(&conntrack, &ct_key);
         bpf_map_delete_elem(&backendtrack, &bt_key);
-
-        bpf_printk("conn deleted (client path). Backend %pI4 conns=%d",
-                   &b->ip, nb.conns);
       }
     }
 
