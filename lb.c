@@ -253,16 +253,17 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
 
-  // Build the conntrack reverse-lookup key (used when packet came
-  // from the backend toward the LB).
-  struct five_tuple_t ct_key_from_backend = {};
-  ct_key_from_backend.src_ip   = ip->daddr;   // LB IP
-  ct_key_from_backend.dst_ip   = ip->saddr;   // backend IP
-  ct_key_from_backend.src_port = tcp->dest;   // client src port 
-  ct_key_from_backend.dst_port = tcp->source; // dest port on backend side
-  ct_key_from_backend.protocol = IPPROTO_TCP;
+  // Lookup conntrack (connection tracking) information - actually eBPF map
+  // Connection exist: backend response
+  // No Connection: client request
+  struct five_tuple_t in = {};
+  in.src_ip   = ip->daddr;   // LB IP
+  in.dst_ip   = ip->saddr;   // backend IP
+  in.src_port = tcp->dest;   // client src port 
+  in.dst_port = tcp->source; // dest port on backend side
+  in.protocol = IPPROTO_TCP;
 
-  struct conn_meta *ct = bpf_map_lookup_elem(&conntrack, &ct_key_from_backend);
+  struct conn_meta *ct = bpf_map_lookup_elem(&conntrack, &in);
  
   if (ct) {
     //packet arrived from backend, connection exists
@@ -276,8 +277,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         // Backend FIN is first
         updated.state = 3;
       }
-      bpf_map_update_elem(&conntrack, &ct_key_from_backend, &updated, BPF_ANY);
-      ct = bpf_map_lookup_elem(&conntrack, &ct_key_from_backend);
+      bpf_map_update_elem(&conntrack, &in, &updated, BPF_ANY);
+      ct = bpf_map_lookup_elem(&conntrack, &in);
       if (!ct)
         return XDP_ABORTED;
     }
@@ -294,7 +295,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
 
       // Delete conntrack entry
-      bpf_map_delete_elem(&conntrack, &ct_key_from_backend);
+      bpf_map_delete_elem(&conntrack, &in);
 
       // Delete backendtrack entry (key is client-facing direction)
       struct five_tuple_t bt_key = {};
@@ -309,7 +310,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                  &b->ip, nb.conns);
     }
 
-    // Perform a FIB lookup 
+    // Perform a FIB lookup
     int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, ct->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
