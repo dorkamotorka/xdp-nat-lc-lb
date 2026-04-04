@@ -208,8 +208,8 @@ SEC("xdp")
 int xdp_load_balancer(struct xdp_md *ctx) {
   void *data_end = (void *)(long)ctx->data_end;
   void *data     = (void *)(long)ctx->data;
-
-  struct hdr_cursor nh = { .pos = data };
+  struct hdr_cursor nh;
+  nh.pos = data;
 
   //parse Ethernet header
   struct ethhdr *eth;
