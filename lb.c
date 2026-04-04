@@ -257,11 +257,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Connection exist: backend response
   // No Connection: client request
   struct five_tuple_t in = {};
-  in.src_ip   = ip->daddr;   // LB IP
-  in.dst_ip   = ip->saddr;   // backend IP
-  in.src_port = tcp->dest;   // client src port 
-  in.dst_port = tcp->source; // dest port on backend side
-  in.protocol = IPPROTO_TCP;
+  in.src_ip = ip->daddr;     // LB IP
+  in.dst_ip = ip->saddr;     // Client or Backend IP
+  in.src_port = tcp->dest;   // LB destination port same as source port from which it redirected the request to backend
+  in.dst_port = tcp->source; // Client or Backend source port
+  in.protocol = IPPROTO_TCP; // TCP protocol
 
   struct conn_meta *ct = bpf_map_lookup_elem(&conntrack, &in);
  
