@@ -467,15 +467,19 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Recalculate checksums
   ip->check   = recalc_ip_checksum(ip);
   tcp->check  = recalc_tcp_checksum(tcp, ip, data_end);
+  // We don’t need to recalculate a Ethernet frame checksum after changing
+  // Ethernet MACs because the Ethernet frame checksum (FCS) isn’t in the header
+  // but instead is automatically recomputed by the NIC hardware when the packet
+  // is transmitted.
 
-  /*bpf_printk("OUT: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
+  bpf_printk("OUT: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
   bpf_printk("OUT SRC MAC %02x:%02x", eth->h_source[0], eth->h_source[1]);
   bpf_printk("OUT SRC MAC %02x:%02x", eth->h_source[2], eth->h_source[3]);
   bpf_printk("OUT SRC MAC %02x:%02x", eth->h_source[4], eth->h_source[5]);
 
   bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[0], eth->h_dest[1]);
   bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[2], eth->h_dest[3]);
-  bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[4], eth->h_dest[5]);*/
+  bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[4], eth->h_dest[5]);
 
 
   return XDP_TX;
