@@ -453,35 +453,36 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       return XDP_ABORTED;
     }
 
-    // Rewrite destination to backend IP/MAC
+    // Replace destination IP and MAC with clients' IP and MAC
     ip->daddr = b->ip;
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
-
-    bpf_printk("Backend %pI4 conns=%d", &b->ip, b->conns);
   }
 
-  // rewrite: source IP/MAC = LB 
+  // Replace source IP with load balancers' IP
   ip->saddr = lb_ip;
+  // Replace source MAC with load balancers' MAC
   __builtin_memcpy(eth->h_source, fib.smac, ETH_ALEN);
 
-  // Recalculate checksums
-  ip->check   = recalc_ip_checksum(ip);
-  tcp->check  = recalc_tcp_checksum(tcp, ip, data_end);
+  // We need to recalculate IP checksum because we modified the IP header
+  ip->check = recalc_ip_checksum(ip);
+
+  // As well as TCP Checksum
+  tcp->check = recalc_tcp_checksum(tcp, ip, data_end);
+
   // We don’t need to recalculate a Ethernet frame checksum after changing
   // Ethernet MACs because the Ethernet frame checksum (FCS) isn’t in the header
   // but instead is automatically recomputed by the NIC hardware when the packet
   // is transmitted.
 
   bpf_printk("OUT: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-  bpf_printk("OUT SRC MAC %02x:%02x", eth->h_source[0], eth->h_source[1]);
-  bpf_printk("OUT SRC MAC %02x:%02x", eth->h_source[2], eth->h_source[3]);
-  bpf_printk("OUT SRC MAC %02x:%02x", eth->h_source[4], eth->h_source[5]);
+  bpf_printk("OUT: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
+             "%02x:%02x:%02x:%02x:%02x:%02x",
+             eth->h_source[0], eth->h_source[1], eth->h_source[2],
+             eth->h_source[3], eth->h_source[4], eth->h_source[5],
+             eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
+             eth->h_dest[4], eth->h_dest[5]);
 
-  bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[0], eth->h_dest[1]);
-  bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[2], eth->h_dest[3]);
-  bpf_printk("OUT DST MAC %02x:%02x", eth->h_dest[4], eth->h_dest[5]);
-
-
+  // Return XDP_TX to transmit the modified packet back to the network
   return XDP_TX;
 }
 
