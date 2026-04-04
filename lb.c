@@ -249,7 +249,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
              eth->h_source[3], eth->h_source[4], eth->h_source[5],
              eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
              eth->h_dest[4], eth->h_dest[5]);
-             
+
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
 
@@ -262,6 +262,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   in.src_port = tcp->dest;   // LB destination port same as source port from which it redirected the request to backend
   in.dst_port = tcp->source; // Client or Backend source port
   in.protocol = IPPROTO_TCP; // TCP protocol
+
+  struct bpf_fib_lookup fib = {};
 
   struct conn_meta *ct = bpf_map_lookup_elem(&conntrack, &in);
  
