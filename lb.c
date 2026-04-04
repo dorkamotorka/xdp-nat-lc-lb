@@ -75,8 +75,6 @@ struct {
   __type(value, struct five_tuple_t);   //  stores the conntrack lookup key
 } backendtrack SEC(".maps");
 
-// helpers
-
 static __always_inline void log_fib_error(int rc) {
   switch (rc) {
   case BPF_FIB_LKUP_RET_BLACKHOLE:
@@ -214,6 +212,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Parse Ethernet header to extract source and destination MAC address
   struct ethhdr *eth;
   int eth_type = parse_ethhdr(&nh, data_end, &eth);
+  // For simplicity we only show IPv4 load-balancing
   if (eth_type != bpf_htons(ETH_P_IP)) {
     return XDP_PASS;
   }
@@ -245,14 +244,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
 
   bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-  /*bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
+  bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
              "%02x:%02x:%02x:%02x:%02x:%02x",
              eth->h_source[0], eth->h_source[1], eth->h_source[2],
              eth->h_source[3], eth->h_source[4], eth->h_source[5],
              eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
-             eth->h_dest[4], eth->h_dest[5]);*/
+             eth->h_dest[4], eth->h_dest[5]);
              
-  //store Load Balancer IP for later
+  // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
 
   struct bpf_fib_lookup fib = {};
