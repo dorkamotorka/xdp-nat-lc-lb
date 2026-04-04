@@ -70,8 +70,9 @@ func main() {
 			log.Fatalf("Invalid backend IP %q: %v", backend, err)
 		}
 
-		backEp := lbEndpoint{
-			Ip: backIP,
+		backEp := lbBackend{
+			Ip:    backIP,
+			Conns: 0,
 		}
 
 		// Use index i as the map key to store multiple endpoints

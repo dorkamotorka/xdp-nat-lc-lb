@@ -12,6 +12,7 @@
 
 struct endpoint {
   __u32 ip;
+  __u32 conns;
 };
 
 struct five_tuple_t {
@@ -20,6 +21,19 @@ struct five_tuple_t {
   __u16 src_port;
   __u16 dst_port;
   __u8  protocol;
+};
+
+// Connection state lives ONLY here (conntrack map).
+// State values:
+//   0 = SYN seen, not yet established
+//   1 = Established
+//   2 = Client sent FIN first
+//   3 = Backend sent FIN first
+//   4 = Both sides have FIN'd → delete on next ACK
+struct conn_meta {
+  __u32 ip;           // client IP (used for backend traffic to rewrite back to client IP)
+  __u32 backend_idx;  // used for client traffic to index into backends map
+  __u8  state;
 };
 
 // Backend IPs
@@ -32,23 +46,34 @@ struct {
   __type(value, struct endpoint);
 } backends SEC(".maps");
 
+// conntrack: keyed by (LB-side five-tuple as seen FROM the backend)
+//   src_ip   = LB IP
+//   dst_ip   = backend IP
+//   src_port = client source port  (LB preserves it when forwarding)
+//   dst_port = destination port (e.g. 8000)
+//
+// This is the store for conn_meta / state.
 struct {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1000);
   __type(key, struct five_tuple_t);
-  __type(value, struct endpoint);
+  __type(value, struct conn_meta);
 } conntrack SEC(".maps");
 
-// FNV-1a hash implementation for load balancing
-static __always_inline __u32 xdp_hash_tuple(struct five_tuple_t *tuple) {
-  __u32 hash = 2166136261U;
-  hash = (hash ^ tuple->src_ip) * 16777619U;
-  hash = (hash ^ tuple->dst_ip) * 16777619U;
-  hash = (hash ^ tuple->src_port) * 16777619U;
-  hash = (hash ^ tuple->dst_port) * 16777619U;
-  hash = (hash ^ tuple->protocol) * 16777619U;
-  return hash;
-}
+// backendtrack: keyed by the client-facing five-tuple
+//   src_ip   = client IP
+//   dst_ip   = LB IP
+//   src_port = client source port
+//   dst_port = destination port 
+//
+// Value is NOT conn_meta any more – it is the conntrack key so we
+// can look up the single authoritative conn_meta without duplicating state.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 1000);
+  __type(key, struct five_tuple_t);
+  __type(value, struct five_tuple_t);   //  stores the conntrack lookup key
+} backendtrack SEC(".maps");
 
 static __always_inline void log_fib_error(int rc) {
   switch (rc) {
@@ -239,61 +264,182 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   in.protocol = IPPROTO_TCP; // TCP protocol
 
   struct bpf_fib_lookup fib = {};
-  struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
-  if (!out) {
-    bpf_printk("Packet from client because no such connection exists yet");
 
-    // Choose backend using simple hashing
-    struct five_tuple_t five_tuple = {};
-    five_tuple.src_ip = ip->saddr;
-    five_tuple.dst_ip = ip->daddr;
-    five_tuple.src_port = tcp->source;
-    five_tuple.dst_port = tcp->dest;
-    five_tuple.protocol = IPPROTO_TCP;
-    // Hash the 5-tuple for persistent backend routing and
-    // perform modulo with the number of backends (NUM_BACKENDS=2 hardcoded for simplicity)
-    __u32 key = xdp_hash_tuple(&five_tuple) % NUM_BACKENDS;
-    // Lookup calculated key and retrieve the backend endpoint information
-    // NOTE: The 'backends' eBPF Map is populated from user space
-    struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
-    if (!backend) {
-      return XDP_ABORTED;
+  struct conn_meta *ct = bpf_map_lookup_elem(&conntrack, &in);
+ 
+  if (ct) {
+    //packet arrived from backend, connection exists
+    // check if backend is terminating the connection
+    if (tcp->fin) {
+      struct conn_meta updated = *ct;
+      if (ct->state == 2) {
+        // Client already sent FIN , both sides done
+        updated.state = 4;
+      } else {
+        // Backend FIN is first
+        updated.state = 3;
+      }
+      bpf_map_update_elem(&conntrack, &in, &updated, BPF_ANY);
+      ct = bpf_map_lookup_elem(&conntrack, &in);
+      if (!ct)
+        return XDP_ABORTED;
+    }
+
+    //  Cleanup: final ACK or RST 
+    if ((tcp->ack && ct->state == 4 && tcp->fin == 0) || tcp->rst) {
+      // Decrement backend connection counter
+      struct backend *b = bpf_map_lookup_elem(&backends, &ct->backend_idx);
+      if (!b)
+        return XDP_ABORTED;
+      struct endpoint nb = *b;
+      if (nb.conns > 0)
+        nb.conns -= 1;
+      bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
+
+      // Delete conntrack entry
+      bpf_map_delete_elem(&conntrack, &in);
+
+      // Delete backendtrack entry (key is client-facing direction)
+      struct five_tuple_t bt_key = {};
+      bt_key.src_ip   = ct->ip;
+      bt_key.dst_ip   = ip->daddr;
+      bt_key.src_port = tcp->dest;
+      bt_key.dst_port = tcp->source;
+      bt_key.protocol = IPPROTO_TCP;
+      bpf_map_delete_elem(&backendtrack, &bt_key);
     }
 
     // Perform a FIB lookup
-    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip,
+    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, ct->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
       log_fib_error(rc);
       return XDP_ABORTED;
     }
 
-    // Store connection in the conntrack eBPF map (client -> backend)
-    struct five_tuple_t in_loadbalancer = {};
-    in_loadbalancer.src_ip = ip->daddr;   // LB IP
-    in_loadbalancer.dst_ip = backend->ip; // Backend IP
-    in_loadbalancer.src_port = tcp->source; // Client source port equal to the LB source port since we don't modify it!
-    in_loadbalancer.dst_port = tcp->dest; // LB destination port
-    in_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol 
-    struct endpoint client;
-    client.ip = ip->saddr; // Client IP
-    int ret =
-        bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
-    if (ret != 0) {
-      bpf_printk("Failed to update conntrack eBPF map");
-      return XDP_ABORTED;
-    }
-
-    // Replace destination IP with backends' IP
-    ip->daddr = backend->ip;
     // Replace destination MAC with backends' MAC
+    ip->daddr = ct->ip;
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
   } else {
     bpf_printk("Packet from backend because the connection exists - "
                "redirecting back to client");
 
+    struct five_tuple_t bt_key = {};
+    bt_key.src_ip   = ip->saddr;
+    bt_key.dst_ip   = ip->daddr;
+    bt_key.src_port = tcp->source;
+    bt_key.dst_port = tcp->dest;
+    bt_key.protocol = IPPROTO_TCP;
+
+    struct five_tuple_t *ct_key_ptr = bpf_map_lookup_elem(&backendtrack, &bt_key);
+
+    struct endpoint *b;
+    struct five_tuple_t ct_key = {};
+
+    if (!ct_key_ptr) {
+      if(tcp->syn == 0)
+        // if not SYN, but no existing connection, drop (not valid)
+        return XDP_ABORTED;
+      // New connection: pick backend with least connections
+      //for simplicity, we do not use a for loop since we have only 2 backends, but this can be easily extended with more backends and a loop
+      __u32 key      = 0;
+      __u32 min_conn = (__u32)-1;
+
+      __u32 i0 = 0;
+      struct endpoint *b0 = bpf_map_lookup_elem(&backends, &i0);
+      if (b0 && b0->conns < min_conn) { min_conn = b0->conns; key = i0; }
+
+      __u32 i1 = 1;
+      struct endpoint *b1 = bpf_map_lookup_elem(&backends, &i1);
+      if (b1 && b1->conns < min_conn) { min_conn = b1->conns; key = i1; }
+
+      b = bpf_map_lookup_elem(&backends, &key);
+      if (!b)
+        return XDP_ABORTED;
+
+      // Build the conntrack key to store new connection(backend ip and state)
+      struct five_tuple_t ct_key = {};
+      ct_key.src_ip   = ip->daddr;
+      ct_key.dst_ip   = b->ip;
+      ct_key.src_port = tcp->source;
+      ct_key.dst_port = tcp->dest;
+      ct_key.protocol = IPPROTO_TCP;
+
+      // store connection (state=0: SYN seen, not yet established)
+      struct conn_meta meta = {};
+      meta.ip          = ip->saddr;  // client IP for reply rewriting
+      meta.backend_idx = key;
+      meta.state       = 0;
+
+      // Insert into conntrack (used by backend )
+      if (bpf_map_update_elem(&conntrack, &ct_key, &meta, BPF_ANY) != 0)
+        return XDP_ABORTED;
+
+      // Insert into backendtrack with the conntrack key as value
+      if (bpf_map_update_elem(&backendtrack, &bt_key, &ct_key, BPF_ANY) != 0)
+        return XDP_ABORTED;
+
+    } else {
+      // ── Existing connection: look up the live conn_meta ──────
+      ct_key = *ct_key_ptr;
+
+      ct = bpf_map_lookup_elem(&conntrack, &ct_key);
+      if (!ct)
+        return XDP_ABORTED;
+
+      b = bpf_map_lookup_elem(&backends, &ct->backend_idx);
+      if (!b)
+        return XDP_ABORTED;
+
+      //  If state is 0 and first non-SYN packet , meaning connection established 
+      if (ct->state == 0 && tcp->syn == 0) {
+        struct conn_meta updated = *ct;
+        updated.state = 1;// connection established, update state to 1
+        // Only one write needed , backendtrack points here
+        bpf_map_update_elem(&conntrack, &ct_key, &updated, BPF_ANY);
+
+        // Increment connection counter for the backend
+        struct endpoint nb = *b;
+        nb.conns += 1;
+        bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
+        ct = bpf_map_lookup_elem(&conntrack, &ct_key);
+        if (!ct)
+          return XDP_ABORTED;
+      }
+
+      // if FIN packet, connection is terminating
+      if (tcp->fin) {
+        struct conn_meta updated = *ct;
+        if (ct->state == 3) {
+          // Backend already sent FIN, both sides done, update state to 4 to wait for final ACK before cleanup
+          updated.state = 4;
+        } else {
+          // Client FIN is first
+          updated.state = 2;// update state to 2 to wait for backend FIN
+        }
+        // Single write to conntrack , both paths will see it
+        bpf_map_update_elem(&conntrack, &ct_key, &updated, BPF_ANY);
+
+        ct = bpf_map_lookup_elem(&conntrack, &ct_key);
+        if (!ct)
+          return XDP_ABORTED;
+      }
+
+      //cleanup: final ACK or RST 
+      if ((tcp->ack && ct->state == 4 && tcp->fin == 0) || tcp->rst) {
+        struct endpoint nb = *b;
+        //decrement backend connection counter
+        if (nb.conns > 0)
+          nb.conns -= 1;
+        bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
+        // delete conntrack and backendtrack entries
+        bpf_map_delete_elem(&conntrack, &ct_key);
+        bpf_map_delete_elem(&backendtrack, &bt_key);
+      }
+    }
+
     // Perform a FIB lookup - same as above
-    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, out->ip,
+    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, b->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
       log_fib_error(rc);
@@ -301,7 +447,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     }
 
     // Replace destination IP and MAC with clients' IP and MAC
-    ip->daddr = out->ip;
+    ip->daddr = b->ip;
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
   }
 
