@@ -242,7 +242,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     return XDP_PASS;
   }
 
-
   bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
   bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
              "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -253,8 +252,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
              
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
-
-  struct bpf_fib_lookup fib = {};
 
   // Build the conntrack reverse-lookup key (used when packet came
   // from the backend toward the LB).
@@ -312,7 +309,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                  &b->ip, nb.conns);
     }
 
-    // FIB lookup: send reply toward the client 
+    // Perform a FIB lookup 
     int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, ct->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
@@ -320,11 +317,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       return XDP_ABORTED;
     }
 
-    // Rewrite destination to client IP/MAC
+    // Replace destination MAC with backends' MAC
     ip->daddr = ct->ip;
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
-
-
   } else {
     // connection not found, hence packet is from client
     // Build the client-facing five-tuple for backendtrack
