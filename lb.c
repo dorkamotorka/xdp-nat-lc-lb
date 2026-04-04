@@ -4,15 +4,13 @@
 #include <bpf/bpf_helpers.h>
 #include "parse_helpers.h"
 
-#define NUM_BACKENDS 2
-#define ETH_ALEN 6
-#define AF_INET 2
-#define IPROTO_TCP 6
-#define MAX_TCP_CHECK_WORDS 100
+#define NUM_BACKENDS 2 // Hardcoded number of backends
+#define ETH_ALEN 6 // Octets in one ethernet addr
+#define AF_INET 2 // Instead of including the whole sys/socket.h header
+#define IPROTO_TCP 6 // TCP
+#define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
-//every backend's ip and number of active connections
-
-struct backend {
+struct endpoint {
   __u32 ip;
   __u32 conns;
 };
@@ -45,7 +43,7 @@ struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, NUM_BACKENDS);
   __type(key, __u32);
-  __type(value, struct backend);
+  __type(value, struct endpoint);
 } backends SEC(".maps");
 
 // conntrack: keyed by (LB-side five-tuple as seen FROM the backend)
@@ -319,7 +317,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       struct backend *b = bpf_map_lookup_elem(&backends, &ct->backend_idx);
       if (!b)
         return XDP_ABORTED;
-      struct backend nb = *b;
+      struct endpoint nb = *b;
       if (nb.conns > 0)
         nb.conns -= 1;
       bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
@@ -359,7 +357,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     struct five_tuple_t *ct_key_ptr =
         bpf_map_lookup_elem(&backendtrack, &bt_key);
 
-    struct backend *b;
+    struct endpoint *b;
     struct five_tuple_t ct_key = {};
 
     if (!ct_key_ptr) {
@@ -372,11 +370,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       __u32 min_conn = (__u32)-1;
 
       __u32 i0 = 0;
-      struct backend *b0 = bpf_map_lookup_elem(&backends, &i0);
+      struct endpoint *b0 = bpf_map_lookup_elem(&backends, &i0);
       if (b0 && b0->conns < min_conn) { min_conn = b0->conns; key = i0; }
 
       __u32 i1 = 1;
-      struct backend *b1 = bpf_map_lookup_elem(&backends, &i1);
+      struct endpoint *b1 = bpf_map_lookup_elem(&backends, &i1);
       if (b1 && b1->conns < min_conn) { min_conn = b1->conns; key = i1; }
 
       b = bpf_map_lookup_elem(&backends, &key);
@@ -420,7 +418,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         bpf_map_update_elem(&conntrack, &ct_key, &updated, BPF_ANY);
 
         // Increment connection counter for the backend
-        struct backend nb = *b;
+        struct endpoint nb = *b;
         nb.conns += 1;
         bpf_map_update_elem(&backends, &ct->backend_idx, &nb, BPF_ANY);
         bpf_printk("conn established : Backend %pI4 conns=%d",
@@ -450,7 +448,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
       //cleanup: final ACK or RST 
       if ((tcp->ack && ct->state == 4 && tcp->fin == 0) || tcp->rst) {
-        struct backend nb = *b;
+        struct endpoint nb = *b;
         //decrement backend connection counter
         if (nb.conns > 0)
           nb.conns -= 1;
