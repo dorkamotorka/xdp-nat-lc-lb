@@ -445,7 +445,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       }
     }
 
-    // FIB lookup: forward packet toward the backend 
+    // Perform a FIB lookup - same as above
     int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, b->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
