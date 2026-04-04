@@ -207,35 +207,41 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
 SEC("xdp")
 int xdp_load_balancer(struct xdp_md *ctx) {
   void *data_end = (void *)(long)ctx->data_end;
-  void *data     = (void *)(long)ctx->data;
+  void *data = (void *)(long)ctx->data;
   struct hdr_cursor nh;
   nh.pos = data;
 
-  //parse Ethernet header
+  // Parse Ethernet header to extract source and destination MAC address
   struct ethhdr *eth;
   int eth_type = parse_ethhdr(&nh, data_end, &eth);
-  if (eth_type != bpf_htons(ETH_P_IP))
+  if (eth_type != bpf_htons(ETH_P_IP)) {
     return XDP_PASS;
+  }
 
-  //parse IP header
+  // Parse IP header to extract source and destination IP
   struct iphdr *ip;
   int ip_type = parse_iphdr(&nh, data_end, &ip);
-  if ((void *)(ip + 1) > data_end)
+  if ((void *)(ip + 1) > data_end) {
     return XDP_PASS;
-  if (ip->protocol != IPPROTO_TCP)
-    //for simplicity, only load balance TCP traffic
-    return XDP_PASS;
+  }
 
-  // parse tcp header
+  // For simplicity only load-balance TCP traffic
+  if (ip->protocol != IPPROTO_TCP) {
+    return XDP_PASS;
+  }
+
+  // Parse TCP header to extract source and destination port
   struct tcphdr *tcp;
   int tcp_type = parse_tcphdr(&nh, data_end, &tcp);
-  if ((void *)(tcp + 1) > data_end)
+  if ((void *)(tcp + 1) > data_end) {
     return XDP_PASS;
+  }
 
   // We could technically load-balance all the traffic but
   // we only focus on port 8000 to not impact any other network traffic in the playground
-  if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000)
+  if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
     return XDP_PASS;
+  }
 
 
   bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
