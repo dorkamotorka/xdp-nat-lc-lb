@@ -220,12 +220,16 @@ static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
 
   bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
   bpf_map_delete_elem(&statetrack, five_tuple);
+  bpf_printk("Connection closed, cleaned up state and decremented backend %d connection count to %d", conn->backend_index, nb.num_connections);
 }
 
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
                                                   struct connection *conn, 
                                                   struct tcphdr *tcp, 
                                                   int direction) {
+  bpf_printk("Updating connection state for direction %s, current state %d, TCP flags: SYN=%d, ACK=%d, FIN=%d, RST=%d",
+             (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
+  
   // client to backend direction
   if (direction == 0 &&
       conn->state == TCP_STATE_SYN_SEEN &&
@@ -234,22 +238,20 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     if (!conn) {
       return;
     }
-    bpf_printk("TCP Handshake complete, connection established..")
+    bpf_printk("TCP Handshake complete, connection established..");
   }
 
   if (tcp->fin) {
     __u8 new_state;
 
     if (direction == 0) {
-      new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
-                    ? TCP_STATE_FIN_BOTH
-                    : TCP_STATE_FIN_FROM_BACKEND;
-      bpf_printk("FIN seen from client...");
-    } else {
       new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
                     ? TCP_STATE_FIN_BOTH
                     : TCP_STATE_FIN_FROM_CLIENT;
-      bpf_printk("FIN seen from backend...");
+    } else {
+      new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
+                    ? TCP_STATE_FIN_BOTH
+                    : TCP_STATE_FIN_FROM_BACKEND;
     }
 
     conn = update_conn_state(&five_tuple, conn, new_state);
@@ -259,17 +261,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
   }
 
   if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
-    struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-    if (!b) {
-      return;
-    }
-    struct backend nb = *b;
-    if (nb.num_connections > 0) {
-      nb.num_connections -= 1;
-    }
-    bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
-    bpf_map_delete_elem(&statetrack, &five_tuple);
-    bpf_printk("Connection closed, cleaning up..");
+    cleanup_connection(&five_tuple, conn);
   }
 }
 
@@ -313,6 +305,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     return XDP_PASS;
   }
 
+  /*
   bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
   bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
              "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -320,6 +313,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
              eth->h_source[3], eth->h_source[4], eth->h_source[5],
              eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
              eth->h_dest[4], eth->h_dest[5]);
+  */
 
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
@@ -381,7 +375,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       if (!backend) {
         return XDP_ABORTED;
       }
-      bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections)
+      bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections);
 
       // Store the selected backend for this connection in the statetrack map
       struct connection new_conn = {};
@@ -473,6 +467,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // but instead is automatically recomputed by the NIC hardware when the packet
   // is transmitted.
 
+  /*
   bpf_printk("OUT: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
   bpf_printk("OUT: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
              "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -480,6 +475,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
              eth->h_source[3], eth->h_source[4], eth->h_source[5],
              eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
              eth->h_dest[4], eth->h_dest[5]);
+  */
 
   // Return XDP_TX to transmit the modified packet back to the network
   return XDP_TX;
