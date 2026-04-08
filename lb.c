@@ -220,15 +220,15 @@ static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
 
   bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
   bpf_map_delete_elem(&statetrack, five_tuple);
-  bpf_printk("Connection closed, cleaned up state and decremented backend %d connection count to %d", conn->backend_index, nb.num_connections);
+  bpf_printk("Connection closed, cleaned up state and decremented backend with IP %pI4 connection count to %d", &nb.endpoint.ip, nb.num_connections);
 }
 
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
                                                   struct connection *conn, 
                                                   struct tcphdr *tcp, 
                                                   int direction) {
-  bpf_printk("Updating connection state for direction %s, current state %d, TCP flags: SYN=%d, ACK=%d, FIN=%d, RST=%d",
-             (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
+  //bpf_printk("Updating connection state for direction %s, current state %d, TCP flags: SYN=%d, ACK=%d, FIN=%d, RST=%d",
+  //           (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
   
   // client to backend direction
   if (direction == 0 &&
@@ -238,7 +238,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     if (!conn) {
       return;
     }
-    bpf_printk("TCP Handshake complete, connection established..");
+    //bpf_printk("TCP Handshake complete, connection established..");
   }
 
   if (tcp->fin) {
@@ -331,7 +331,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   struct bpf_fib_lookup fib = {};
   struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
   if (!out) {
-    bpf_printk("Packet from client..");
+    //bpf_printk("Packet from client..");
 
     // Check for existing connections
     struct five_tuple_t five_tuple = {};
@@ -344,7 +344,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     struct backend *backend;
     struct connection *conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
     if (conn) {
-      bpf_printk("Existing connection found in statetrack map - update state and proceed with the same backend..");
+      //bpf_printk("Existing connection found in statetrack map - update state and proceed with the same backend..");
       update_tcp_conn_state(five_tuple, conn, tcp, 0);
       backend = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!backend) {
@@ -355,7 +355,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       if (tcp->syn == 0) {
         return XDP_ABORTED;
       }
-      bpf_printk("No existing connection found in statetrack map, new connection so select a backend..");
+      //bpf_printk("No existing connection found in statetrack map, new connection so select a backend..");
 
       // Select a backend using least connections algorithm
       __u32 key = 0;
@@ -421,7 +421,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     // Replace destination MAC with backends' MAC
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
   } else {
-    bpf_printk("Packet from backend..");
+    //bpf_printk("Packet from backend..");
 
     // make the key to lookup the connection in the statetrack map
     struct five_tuple_t out_loadbalancer = {};
