@@ -219,6 +219,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     } else {  
       // Handshake completed → connection established
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
+      if (!conn) return;
       bpf_printk("Updating connection state for direction %s, current state %d, TCP flags: SYN=%d, ACK=%d, FIN=%d, RST=%d", (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
   
     }
