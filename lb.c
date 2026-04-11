@@ -8,7 +8,7 @@
 #define ETH_ALEN 6              // Octets in one ethernet addr
 #define AF_INET 2               // Instead of including the whole sys/socket.h header
 #define IPROTO_TCP 6            // TCP
-#define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
+#define MAX_TCP_CHECK_WORDS 750 // max bytes to check in TCP checksum
 
 struct five_tuple_t {
   __u32 src_ip;
@@ -210,17 +210,21 @@ static __always_inline struct connection* update_conn_state(struct five_tuple_t 
 // Decrement backend connection count + delete connection
 static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
                                                struct connection *conn) {
-  struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-  if (!b)
-    return;
+    struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
+    if (!b) {
+        return;
+    }
 
-  struct backend nb = *b;
-  if (nb.num_connections > 0)
-    nb.num_connections--;
+    // Decrement connection count safely
+    if (b->num_connections > 0) {
+        b->num_connections--;
+    }
 
-  bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
-  bpf_map_delete_elem(&statetrack, five_tuple);
-  bpf_printk("Connection closed, cleaned up state and decremented backend with IP %pI4 connection count to %d", &nb.endpoint.ip, nb.num_connections);
+    // Update backend and remove connection state
+    bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+    bpf_map_delete_elem(&statetrack, five_tuple);
+
+    bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
 }
 
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
@@ -307,16 +311,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
     return XDP_PASS;
   }
-
-  /*
-  bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-  bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
-             "%02x:%02x:%02x:%02x:%02x:%02x",
-             eth->h_source[0], eth->h_source[1], eth->h_source[2],
-             eth->h_source[3], eth->h_source[4], eth->h_source[5],
-             eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
-             eth->h_dest[4], eth->h_dest[5]);
-  */
 
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
@@ -465,16 +459,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Ethernet MACs because the Ethernet frame checksum (FCS) isn’t in the header
   // but instead is automatically recomputed by the NIC hardware when the packet
   // is transmitted.
-
-  /*
-  bpf_printk("OUT: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-  bpf_printk("OUT: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
-             "%02x:%02x:%02x:%02x:%02x:%02x",
-             eth->h_source[0], eth->h_source[1], eth->h_source[2],
-             eth->h_source[3], eth->h_source[4], eth->h_source[5],
-             eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
-             eth->h_dest[4], eth->h_dest[5]);
-  */
 
   // Return XDP_TX to transmit the modified packet back to the network
   return XDP_TX;
