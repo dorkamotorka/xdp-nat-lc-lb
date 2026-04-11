@@ -207,24 +207,6 @@ static __always_inline struct connection *update_conn_state(struct five_tuple_t 
   return bpf_map_lookup_elem(&statetrack, five_tuple);
 }
 
-// Decrement backend connection count + delete connection track
-static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
-                                               struct connection *conn) {
-  struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-  if (!b) return;
-
-  // Decrement connection count safely
-  if (b->num_connections > 0) {
-    b->num_connections--;
-  }
-
-  // Update backend and remove connection state
-  bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
-  bpf_map_delete_elem(&statetrack, five_tuple);
-
-  bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
-}
-
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
                                                   struct connection *conn, 
                                                   struct tcphdr *tcp, 
@@ -264,7 +246,13 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
   // - Both sides have exchanged FINs and we see the final ACK
   // - OR connection is forcefully terminated via RST
   if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
-    cleanup_connection(&five_tuple, conn); 
+    struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
+    if (b) {
+      if (b->num_connections > 0) b->num_connections--;
+      bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+      bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
+    }
+    bpf_map_delete_elem(&statetrack, &five_tuple);
   }
 }
 
