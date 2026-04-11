@@ -219,20 +219,8 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     } else {  
       // Handshake completed → connection established
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
-      if (!conn) return;
-
-      // Increment the connection count for the selected backend
-      //struct backend updated_backend = *backend;
-      //updated_backend.num_connections += 1;
-      //if (bpf_map_update_elem(&backends, &key, &updated_backend, BPF_ANY) != 0) {
-      //  return XDP_ABORTED;
-      //}
-      
-      struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-      if (b) {
-        b->num_connections++;
-        bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
-      }
+      bpf_printk("Updating connection state for direction %s, current state %d, TCP flags: SYN=%d, ACK=%d, FIN=%d, RST=%d", (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
+  
     }
     if (!conn) return;
   }
@@ -380,6 +368,13 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       struct endpoint client;
       client.ip = ip->saddr; // Client IP
       if (bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY) != 0) {
+        return XDP_ABORTED;
+      }
+
+      // Increment the connection count for the selected backend
+      struct backend updated_backend = *backend;
+      updated_backend.num_connections += 1;
+      if (bpf_map_update_elem(&backends, &key, &updated_backend, BPF_ANY) != 0) {
         return XDP_ABORTED;
       }
     }
