@@ -211,19 +211,15 @@ static __always_inline struct connection *update_conn_state(struct five_tuple_t 
 static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
                                                struct connection *conn) {
     struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-    if (!b) {
-      return;
-    }
+    if (!b) return;
 
     // Decrement connection count safely
     if (b->num_connections > 0) {
-      b->num_connections--;
+      __sync_fetch_and_sub(&b->num_connections, 1);
     }
 
-    // Update backend and remove connection state
-    bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+    // Remove connection state
     bpf_map_delete_elem(&statetrack, five_tuple);
-
     bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
 }
 
@@ -240,9 +236,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
       // Handshake completed → connection established
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
     }    
-    if (!conn) {
-      return;
-    }
+    if (!conn) return;
   }
 
   // Handle connection teardown
@@ -261,16 +255,14 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     }
 
     conn = update_conn_state(&five_tuple, conn, new_state);
-    if (!conn) {
-      return;
-    }
+    if (!conn) return;
   }
 
   // Final cleanup conditions:
   // - Both sides have exchanged FINs and we see the final ACK
   // - OR connection is forcefully terminated via RST
   if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
-    cleanup_connection(&five_tuple, conn);
+    cleanup_connection(&five_tuple, conn); 
   }
 }
 
@@ -341,14 +333,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     five_tuple.protocol = IPPROTO_TCP;
 
     struct backend *backend;
+    struct connection *conn_ptr;
+    struct connection new_conn = {};
     struct connection *conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
     if (conn) {
       // Existing connection found in statetrack map - update state and proceed with the same backend..
-      update_tcp_conn_state(five_tuple, conn, tcp, 0);
-      backend = bpf_map_lookup_elem(&backends, &conn->backend_index);
-      if (!backend) {
-        return XDP_ABORTED;
-      }
+      conn_ptr = conn;
+      backend = bpf_map_lookup_elem(&backends, &conn_ptr->backend_index);
+      if (!backend) return XDP_ABORTED;
     } else {
       // This is a new connection, we need to select a backend and create a new connection state
       __u32 key = 0;
@@ -364,18 +356,15 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         }
       }
 
-      // Lookup the chosen backend
-      backend = bpf_map_lookup_elem(&backends, &key);
-      if (!backend) {
-        return XDP_ABORTED;
-      }
+      if (!candidate_backend) return XDP_ABORTED;
+      backend = candidate_backend;
       bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections);
 
       // Update the connection state
       struct connection new_conn = {};
       new_conn.backend_index = key;
       new_conn.state = TCP_STATE_SYN_SEEN;
-      update_tcp_conn_state(five_tuple, &new_conn, tcp, 0);
+      conn_ptr = &new_conn;
 
       // Store connection in the conntrack eBPF map (client -> backend)
       struct five_tuple_t in_loadbalancer = {};
@@ -386,19 +375,16 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       in_loadbalancer.protocol = IPPROTO_TCP;        // TCP protocol
       struct endpoint client;
       client.ip = ip->saddr; // Client IP
-      int ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
-      if (ret != 0) {
+      if (bpf_map_update_elem(&conntrack, &in_lb, &client, BPF_ANY) != 0) {
         return XDP_ABORTED;
       }
 
       // Increment the connection count for the selected backend
-      struct backend updated_backend = *backend;
-      updated_backend.num_connections += 1;
-      ret = bpf_map_update_elem(&backends, &key, &updated_backend, BPF_ANY);
-      if (ret != 0) {
-        return XDP_ABORTED;
-      }
+      __sync_fetch_and_add(&backend->num_connections, 1);
     }
+
+    // Update state for both existing and new connections
+    update_tcp_conn_state(five_tuple, conn_ptr, tcp, 0);
 
     // Perform a FIB lookup
     int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->endpoint.ip,
@@ -422,9 +408,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     out_loadbalancer.dst_port = tcp->source; // Client destination port
     out_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol
     struct connection *conn = bpf_map_lookup_elem(&statetrack, &out_loadbalancer);
-    if (!conn) {
-      return XDP_ABORTED;
-    }
+    if (!conn) return XDP_ABORTED;
     update_tcp_conn_state(out_loadbalancer, conn, tcp, 1);
 
     // Perform a FIB lookup - same as above
