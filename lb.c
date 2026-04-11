@@ -215,11 +215,13 @@ static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
 
     // Decrement connection count safely
     if (b->num_connections > 0) {
-      __sync_fetch_and_sub(&b->num_connections, 1);
+      b->num_connections--;
     }
 
-    // Remove connection state
+    // Update backend and remove connection state
+    bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
     bpf_map_delete_elem(&statetrack, five_tuple);
+
     bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
 }
 
@@ -345,14 +347,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       // This is a new connection, we need to select a backend and create a new connection state
       __u32 key = 0;
       __u32 min_connections = (__u32) - 1; // Max value for unsigned int
+      struct backend *candidate_backend = NULL;
       for (__u32 i = 0; i < NUM_BACKENDS; i++) {
         __u32 idx = i;
-        struct backend *candidate_backend = bpf_map_lookup_elem(&backends, &idx);
-        if (candidate_backend) {
-          if (candidate_backend->num_connections < min_connections) {
-            min_connections = candidate_backend->num_connections;
+        struct backend *b = bpf_map_lookup_elem(&backends, &idx);
+        if (b && b->num_connections < min_connections) {
+            min_connections = b->num_connections;
             key = idx;
-          }
+            candidate_backend = b;
         }
       }
 
@@ -375,12 +377,16 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       in_loadbalancer.protocol = IPPROTO_TCP;        // TCP protocol
       struct endpoint client;
       client.ip = ip->saddr; // Client IP
-      if (bpf_map_update_elem(&conntrack, &in_lb, &client, BPF_ANY) != 0) {
+      if (bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY) != 0) {
         return XDP_ABORTED;
       }
 
       // Increment the connection count for the selected backend
-      __sync_fetch_and_add(&backend->num_connections, 1);
+      struct backend updated_backend = *backend;
+      updated_backend.num_connections += 1;
+      if (bpf_map_update_elem(&backends, &key, &updated_backend, BPF_ANY) != 0) {
+        return XDP_ABORTED;
+      }
     }
 
     // Update state for both existing and new connections
