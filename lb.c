@@ -18,6 +18,9 @@ struct five_tuple_t {
   __u8  protocol;
 };
 
+// Backend IPs
+// We could also include port information but we simplify
+// and assume that both LB and Backend listen on the same port for requests
 struct endpoint {
   __u32 ip;
 };
@@ -44,9 +47,7 @@ struct connection {
   __u8  state;
 };
 
-// Backend IPs
-// We could also include port information but we simplify
-// and assume that both LB and Backend listen on the same port for requests
+// Map of backends
 struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, NUM_BACKENDS);
@@ -54,6 +55,7 @@ struct {
   __type(value, struct backend);
 } backends SEC(".maps");
 
+// Map of NAT translations 
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
@@ -61,6 +63,7 @@ struct {
   __type(value, struct endpoint);
 } conntrack SEC(".maps");
 
+// Map for connection tracking
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
@@ -207,7 +210,7 @@ static __always_inline struct connection* update_conn_state(struct five_tuple_t 
   return bpf_map_lookup_elem(&statetrack, five_tuple);
 }
 
-// Decrement backend connection count + delete connection
+// Decrement backend connection count + delete connection track
 static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
                                                struct connection *conn) {
     struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
@@ -231,33 +234,32 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
                                                   struct connection *conn, 
                                                   struct tcphdr *tcp, 
                                                   int direction) {
-  //bpf_printk("Updating connection state for direction %s, current state %d, TCP flags: SYN=%d, ACK=%d, FIN=%d, RST=%d",
-  //           (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
-  
-  // client to backend direction
+  // direction: 0 = client -> backend, 1 = backend -> client
   if (direction == 0 && conn->state == TCP_STATE_SYN_SEEN) {
     if (tcp->syn == 1) {
+      // Still in SYN phase (possible retransmission)
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
-      //bpf_printk("Received clients TCP SYN packet..");
     } else {  
+      // Handshake completed → connection established
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
-      //bpf_printk("TCP Handshake complete, connection established..");
     }    
     if (!conn) {
       return;
     }
   }
 
+  // Handle connection teardown
   if (tcp->fin) {
     __u8 new_state;
-
     if (direction == 0) {
+      // TCP FIN from client
       new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
-                    ? TCP_STATE_FIN_BOTH
+                    ? TCP_STATE_FIN_BOTH // backend already sent FIN
                     : TCP_STATE_FIN_FROM_CLIENT;
     } else {
+      // TCP FIN from backend
       new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
-                    ? TCP_STATE_FIN_BOTH
+                    ? TCP_STATE_FIN_BOTH // client already sent FIN
                     : TCP_STATE_FIN_FROM_BACKEND;
     }
 
@@ -267,6 +269,9 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     }
   }
 
+  // Final cleanup conditions:
+  // - Both sides have exchanged FINs and we see the final ACK
+  // - OR connection is forcefully terminated via RST
   if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
     cleanup_connection(&five_tuple, conn);
   }
@@ -341,14 +346,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     struct backend *backend;
     struct connection *conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
     if (conn) {
-      //bpf_printk("Existing connection found in statetrack map - update state and proceed with the same backend..");
+      // Existing connection found in statetrack map - update state and proceed with the same backend..
       update_tcp_conn_state(five_tuple, conn, tcp, 0);
       backend = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!backend) {
         return XDP_ABORTED;
       }
     } else {
-      // sanity check since a new connection must start with a SYN packet
+      // Sanity check since a new connection must start with a SYN packet
       if (tcp->syn == 0) {
         return XDP_ABORTED;
       }
