@@ -8,7 +8,7 @@
 #define ETH_ALEN 6              // Octets in one ethernet addr
 #define AF_INET 2               // Instead of including the whole sys/socket.h header
 #define IPROTO_TCP 6            // TCP
-#define MAX_TCP_CHECK_WORDS 750 // max bytes to check in TCP checksum
+#define MAX_TCP_CHECK_WORDS 750 // Max bytes to check in TCP checksum
 
 struct five_tuple_t {
   __u32 src_ip;
@@ -18,32 +18,30 @@ struct five_tuple_t {
   __u8  protocol;
 };
 
-// Backend IPs
-// We could also include port information but we simplify
-// and assume that both LB and Backend listen on the same port for requests
+// Backend endpoint information - only IP to simplify, but could be extended with port or other metadata
 struct endpoint {
   __u32 ip;
 };
 
 struct backend {
-  // Backend endpoint information (currently only IP, but could be extended with port or other metadata)
+  // Backend endpoint information
   struct endpoint endpoint;
   // Number of active connections to this backend, used for least-connections load balancing algorithm
   __u32  num_connections;
 };
 
 enum tcp_state {
-  TCP_STATE_SYN_SEEN = 0,        // SYN seen, handshake not complete
-  TCP_STATE_ESTABLISHED = 1,     // ACK seen → handshake complete
-  TCP_STATE_FIN_FROM_CLIENT = 2, // FIN seen from client
-  TCP_STATE_FIN_FROM_BACKEND = 3,// FIN seen from backend
-  TCP_STATE_FIN_BOTH = 4,        // FIN seen from both sides, waiting for final ACK
+  TCP_STATE_SYN_SEEN = 0,         // SYN seen from client, handshake not complete
+  TCP_STATE_ESTABLISHED = 1,      // ACK seen from client, handshake complete
+  TCP_STATE_FIN_FROM_CLIENT = 2,  // FIN seen from client
+  TCP_STATE_FIN_FROM_BACKEND = 3, // FIN seen from backend
+  TCP_STATE_FIN_BOTH = 4,         // FIN seen from both sides, waiting for final ACK
 };
 
 struct connection {
   // Index of the backend in the backends map for this connection
   __u32 backend_index;
-  // State based on the tcp_state enum
+  // TCP State
   __u8  state;
 };
 
@@ -319,9 +317,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
 
-  // Lookup conntrack (connection tracking) information - actually eBPF map
-  // Connection exist: backend response
-  // No Connection: client request
+  // Lookup NAT translation connection tracking information:
+  // - Connection exist: backend response
+  // - No Connection:    client request
   struct five_tuple_t in = {};
   in.src_ip = ip->daddr;     // LB IP
   in.dst_ip = ip->saddr;     // Client or Backend IP
@@ -334,7 +332,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   if (!out) {
     //bpf_printk("Packet from client..");
 
-    // Check for existing connections
+    // Check for an existing connection
     struct five_tuple_t five_tuple = {};
     five_tuple.src_ip = ip->saddr;
     five_tuple.dst_ip = ip->daddr;
@@ -352,12 +350,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         return XDP_ABORTED;
       }
     } else {
-      // Sanity check since a new connection must start with a SYN packet
-      if (tcp->syn == 0) {
-        return XDP_ABORTED;
-      }
-
-      // Select a backend using least connections algorithm
+      // This is a new connection, we need to select a backend and create a new connection state
       __u32 key = 0;
       __u32 min_connections = (__u32) - 1; // Max value for unsigned int
       for (__u32 i = 0; i < NUM_BACKENDS; i++) {
@@ -371,6 +364,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         }
       }
 
+      // Lookup the chosen backend
       backend = bpf_map_lookup_elem(&backends, &key);
       if (!backend) {
         return XDP_ABORTED;
@@ -420,15 +414,13 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   } else {
     //bpf_printk("Packet from backend..");
 
-    // make the key to lookup the connection in the statetrack map
+    // Lookup and update the connection in the statetrack map
     struct five_tuple_t out_loadbalancer = {};
     out_loadbalancer.src_ip = out->ip;       // Client IP
     out_loadbalancer.dst_ip = ip->daddr;     // LB IP
     out_loadbalancer.src_port = tcp->dest;   // Client source port
     out_loadbalancer.dst_port = tcp->source; // Client destination port
     out_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol
-
-    // Update connection state in statetrack map
     struct connection *conn = bpf_map_lookup_elem(&statetrack, &out_loadbalancer);
     if (!conn) {
       return XDP_ABORTED;
