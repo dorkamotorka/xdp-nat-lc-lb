@@ -212,7 +212,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
                                                   struct tcphdr *tcp, 
                                                   int direction) {
   // direction: 0 = client -> backend, 1 = backend -> client
-  if (direction == 0 && conn->state == TCP_STATE_SYN_SEEN) {
+  if (direction == 0) {
     if (tcp->syn) {
       // Still in SYN phase (possible retransmission)
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
@@ -359,10 +359,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       backend = candidate_backend;
       bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections);
 
-      // Update the connection state
+      // Set the backend index for this new connection
       struct connection new_conn = {};
       new_conn.backend_index = key;
-      new_conn.state = TCP_STATE_SYN_SEEN;
       conn_ptr = &new_conn;
 
       // Store connection in the conntrack eBPF map (client -> backend)
