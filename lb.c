@@ -29,7 +29,7 @@ struct backend {
   // Backend endpoint information (currently only IP, but could be extended with port or other metadata)
   struct endpoint endpoint;
   // Number of active connections to this backend, used for least-connections load balancing algorithm
-  __u32 num_connections;
+  __u32  num_connections;
 };
 
 enum tcp_state {
@@ -125,8 +125,8 @@ static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip) {
   // Compute incremental checksum difference over the header
   __u64 csum = bpf_csum_diff(0, 0, (unsigned int *)ip, sizeof(struct iphdr), 0);
 
-// fold 64-bit csum to 16 bits (the “carry add” loop)
-#pragma unroll
+  // fold 64-bit csum to 16 bits (the “carry add” loop)
+  #pragma unroll
   for (int i = 0; i < 4; i++) {
     if (csum >> 16)
       csum = (csum & 0xffff) + (csum >> 16);
@@ -145,7 +145,6 @@ static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iph
   sum += bpf_htons(IPPROTO_TCP);
 
   // Pseudo-header: TCP Length (Total IP len - IP header len)
-  // IMPORTANT: Use the IP header, not data_end
   __u16 tcp_len = bpf_ntohs(iph->tot_len) - (iph->ihl * 4);
   sum += bpf_htons(tcp_len);
 
@@ -153,7 +152,7 @@ static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iph
   // Use a safe bound check against data_end for the pointer,
   // but the loop limit should be based on the actual packet size
   __u16 *ptr = (__u16 *)tcph;
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < MAX_TCP_CHECK_WORDS; i++) {
     if ((void *)(ptr + 1) > data_end || (void *)ptr >= (void *)tcph + tcp_len)
       break;
@@ -200,7 +199,7 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
 }
 
 // Update connection state in map and reload pointer
-static __always_inline struct connection* update_conn_state(struct five_tuple_t *five_tuple,
+static __always_inline struct connection *update_conn_state(struct five_tuple_t *five_tuple,
                                                             struct connection *conn,
                                                             __u8 new_state) {
   struct connection updated = *conn;
@@ -215,12 +214,12 @@ static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
                                                struct connection *conn) {
     struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
     if (!b) {
-        return;
+      return;
     }
 
     // Decrement connection count safely
     if (b->num_connections > 0) {
-        b->num_connections--;
+      b->num_connections--;
     }
 
     // Update backend and remove connection state
@@ -236,7 +235,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
                                                   int direction) {
   // direction: 0 = client -> backend, 1 = backend -> client
   if (direction == 0 && conn->state == TCP_STATE_SYN_SEEN) {
-    if (tcp->syn == 1) {
+    if (tcp->syn) {
       // Still in SYN phase (possible retransmission)
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
     } else {  
