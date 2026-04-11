@@ -210,19 +210,19 @@ static __always_inline struct connection *update_conn_state(struct five_tuple_t 
 // Decrement backend connection count + delete connection track
 static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
                                                struct connection *conn) {
-    struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-    if (!b) return;
+  struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
+  if (!b) return;
 
-    // Decrement connection count safely
-    if (b->num_connections > 0) {
-      b->num_connections--;
-    }
+  // Decrement connection count safely
+  if (b->num_connections > 0) {
+    b->num_connections--;
+  }
 
-    // Update backend and remove connection state
-    bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
-    bpf_map_delete_elem(&statetrack, five_tuple);
+  // Update backend and remove connection state
+  bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+  bpf_map_delete_elem(&statetrack, five_tuple);
 
-    bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
+  bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
 }
 
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
@@ -352,9 +352,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         __u32 idx = i;
         struct backend *b = bpf_map_lookup_elem(&backends, &idx);
         if (b && b->num_connections < min_connections) {
-            min_connections = b->num_connections;
-            key = idx;
-            candidate_backend = b;
+          min_connections = b->num_connections;
+          key = idx;
+          candidate_backend = b;
         }
       }
 
