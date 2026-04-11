@@ -212,7 +212,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
                                                   struct tcphdr *tcp, 
                                                   int direction) {
   // direction: 0 = client -> backend, 1 = backend -> client
-  if (direction == 0) {
+  if (direction == 0 && conn->state == TCP_STATE_SYN_SEEN) {
     if (tcp->syn) {
       // Still in SYN phase (possible retransmission)
       conn = update_conn_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
