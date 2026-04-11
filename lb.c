@@ -231,14 +231,17 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
   //           (direction == 0) ? "client->backend" : "backend->client", conn->state, tcp->syn, tcp->ack, tcp->fin, tcp->rst);
   
   // client to backend direction
-  if (direction == 0 &&
-      conn->state == TCP_STATE_SYN_SEEN &&
-      tcp->syn == 0) {
-    conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
+  if (direction == 0 && conn->state == TCP_STATE_SYN_SEEN) {
+    if (tcp->syn == 1) {
+      conn = update_conn_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
+      //bpf_printk("Received clients TCP SYN packet..");
+    } else {  
+      conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
+      //bpf_printk("TCP Handshake complete, connection established..");
+    }    
     if (!conn) {
       return;
     }
-    //bpf_printk("TCP Handshake complete, connection established..");
   }
 
   if (tcp->fin) {
@@ -355,7 +358,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       if (tcp->syn == 0) {
         return XDP_ABORTED;
       }
-      //bpf_printk("No existing connection found in statetrack map, new connection so select a backend..");
 
       // Select a backend using least connections algorithm
       __u32 key = 0;
@@ -377,14 +379,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       }
       bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections);
 
-      // Store the selected backend for this connection in the statetrack map
+      // Update the connection state
       struct connection new_conn = {};
       new_conn.backend_index = key;
       new_conn.state = TCP_STATE_SYN_SEEN;
-      int ret = bpf_map_update_elem(&statetrack, &five_tuple, &new_conn, BPF_ANY);
-      if (ret != 0) {
-        return XDP_ABORTED;
-      }
+      update_tcp_conn_state(five_tuple, &new_conn, tcp, 0);
 
       // Store connection in the conntrack eBPF map (client -> backend)
       struct five_tuple_t in_loadbalancer = {};
@@ -395,7 +394,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       in_loadbalancer.protocol = IPPROTO_TCP;        // TCP protocol
       struct endpoint client;
       client.ip = ip->saddr; // Client IP
-      ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
+      int ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
       if (ret != 0) {
         return XDP_ABORTED;
       }
