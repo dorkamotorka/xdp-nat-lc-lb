@@ -42,7 +42,7 @@ enum tcp_state {
 struct connection {
   // Index of the backend in the backends map for this connection
   __u32 backend_index;
-  // TCP State
+  // State of the connection
   __u8  state;
 };
 
@@ -181,8 +181,7 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
   __builtin_memset(fib, 0, sizeof(*fib));
   // Hardcode address family: AF_INET for IPv4
   fib->family = AF_INET;
-  // Source IPv4 address used by the kernel for policy routing and source
-  // address–based decisions
+  // Source IPv4 address used by the kernel for policy routing and source address–based decisions
   fib->ipv4_src = src;
   // Destination IPv4 address (in network byte order)
   // The address we want to reach; used to find the correct egress route
@@ -224,9 +223,9 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
       conn = update_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
       if (!conn) return;
 
+      // Increment the connection count for the selected backend
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (b) {
-        // Increment the connection count for the selected backend
         b->num_connections++;
         bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
         bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &b->endpoint.ip, b->num_connections);
@@ -253,12 +252,12 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     conn = update_state(&five_tuple, conn, new_state);
     return;
 
-  // After FIN from both sides, we wait for the final ACK or RST to clean up the connection and update backend connection count
+  // After FIN from both sides, we wait for the final ACK or RST to clean up the connection
   case TCP_STATE_FIN_BOTH:
     if ((tcp->ack && !tcp->fin) || tcp->rst) {
+      // Decrement the connection count for the selected backend
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (b) {
-        // Decrement the connection count for the selected backend
         if (b->num_connections > 0) b->num_connections--;
         bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
         bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
