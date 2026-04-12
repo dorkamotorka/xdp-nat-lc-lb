@@ -229,6 +229,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
         // Increment the connection count for the selected backend
         b->num_connections++;
         bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+        bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &b->endpoint.ip, b->num_connections);
       }
     }
     return;
@@ -315,8 +316,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   __u32 lb_ip = ip->daddr;
 
   // Lookup NAT translation connection tracking information:
-  // - Connection exist: backend response
   // - No Connection:    client request
+  // - Connection exist: backend response
   struct five_tuple_t in = {};
   in.src_ip = ip->daddr;     // LB IP
   in.dst_ip = ip->saddr;     // Client or Backend IP
@@ -359,10 +360,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
           candidate_backend = b;
         }
       }
-
       if (!candidate_backend) return XDP_ABORTED;
       backend = candidate_backend;
-      bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections);
 
       // Initialize the connection state on the TCP SYN packet from the client
       struct connection new_conn = {};
