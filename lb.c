@@ -227,7 +227,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (b) {
         // Increment the connection count for the selected backend
-        b.num_connections++;
+        b->num_connections++;
         bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
       }
     }
