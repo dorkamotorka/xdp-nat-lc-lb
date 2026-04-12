@@ -261,6 +261,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
       if (b) {
         if (b->num_connections > 0) b->num_connections--;
         bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+        bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
       }
       bpf_map_delete_elem(&statetrack, &five_tuple);
     }
