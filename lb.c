@@ -31,11 +31,12 @@ struct backend {
 };
 
 enum tcp_state {
-  TCP_STATE_SYN_SEEN = 0,         // SYN seen from client, handshake not complete
-  TCP_STATE_ESTABLISHED = 1,      // ACK seen from client, handshake complete
-  TCP_STATE_FIN_FROM_CLIENT = 2,  // FIN seen from client
-  TCP_STATE_FIN_FROM_BACKEND = 3, // FIN seen from backend
-  TCP_STATE_FIN_BOTH = 4,         // FIN seen from both sides, waiting for final ACK
+  TCP_STATE_UNKNOWN = 0,          // Initial placeholder
+  TCP_STATE_SYN_SEEN = 1,         // SYN seen from client, handshake not complete
+  TCP_STATE_ESTABLISHED = 2,      // ACK seen from client, handshake complete
+  TCP_STATE_FIN_FROM_CLIENT = 3,  // FIN seen from client
+  TCP_STATE_FIN_FROM_BACKEND = 4, // FIN seen from backend
+  TCP_STATE_FIN_BOTH = 5,         // FIN seen from both sides, waiting for final ACK
 };
 
 struct connection {
@@ -197,7 +198,7 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
 }
 
 // Update connection state in map and reload pointer
-static __always_inline struct connection *update_conn_state(struct five_tuple_t *five_tuple,
+static __always_inline struct connection *update_state(struct five_tuple_t *five_tuple,
                                                             struct connection *conn,
                                                             __u8 new_state) {
   conn->state = new_state;
@@ -207,19 +208,22 @@ static __always_inline struct connection *update_conn_state(struct five_tuple_t 
 
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
                                                   struct connection *conn, 
-                                                  struct tcphdr *tcp, 
-                                                  int direction) {
-  // direction: 0 = client -> backend, 1 = backend -> client
-  if (direction == 0 && conn->state == TCP_STATE_SYN_SEEN) {
-    if (tcp->syn) {
-      // Still in SYN phase (possible retransmission)
-      // conn = update_conn_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
-    } else {  
-      // Handshake completed → connection established
-      conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
+                                                  struct tcphdr *tcp,
+                                                  int direction /* 0 = client->backend, 1 = backend->client */) {
+  switch (conn->state) {
+  // Should be SYN from client to backend
+  case TCP_STATE_UNKNOWN:
+    if (direction == 0 && tcp->syn) {
+      conn = update_state(&five_tuple, conn, TCP_STATE_SYN_SEEN);
+    }
+    return;
+
+  // Should be ACK from client to backend completing the handshake
+  case TCP_STATE_SYN_SEEN:
+    if (direction == 0 && !tcp->syn && tcp->ack) {
+      conn = update_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
       if (!conn) return;
 
-      // Increment number of connections for the selected backend
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (b) {
         struct backend updated = *b;
@@ -227,39 +231,43 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
         bpf_map_update_elem(&backends, &conn->backend_index, &updated, BPF_ANY);
       }
     }
-    if (!conn) return;
-  }
+    return;
 
-  // Handle connection teardown
-  if (tcp->fin) {
-    __u8 new_state;
-    if (direction == 0) {
-      // TCP FIN from client
-      new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
-                    ? TCP_STATE_FIN_BOTH // backend already sent FIN
-                    : TCP_STATE_FIN_FROM_CLIENT;
-    } else {
-      // TCP FIN from backend
-      new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
-                    ? TCP_STATE_FIN_BOTH // client already sent FIN
-                    : TCP_STATE_FIN_FROM_BACKEND;
+  // From established state we need to see FINs from both sides
+  case TCP_STATE_ESTABLISHED:
+  case TCP_STATE_FIN_FROM_CLIENT:
+  case TCP_STATE_FIN_FROM_BACKEND:
+    if (tcp->fin) {
+      __u8 new_state;
+
+      if (direction == 0) {
+        new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
+                      ? TCP_STATE_FIN_BOTH
+                      : TCP_STATE_FIN_FROM_CLIENT;
+      } else {
+        new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
+                      ? TCP_STATE_FIN_BOTH
+                      : TCP_STATE_FIN_FROM_BACKEND;
+      }
+
+      conn = update_state(&five_tuple, conn, new_state);
     }
+    return;
 
-    conn = update_conn_state(&five_tuple, conn, new_state);
-    if (!conn) return;
-  }
-
-  // Final cleanup conditions:
-  // - Both sides have exchanged FINs and we see the final ACK
-  // - OR connection is forcefully terminated via RST
-  if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
-    struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-    if (b) {
-      if (b->num_connections > 0) b->num_connections--;
-      bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
-      bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
+  // After FIN from both sides, we wait for the final ACK or RST to clean up the connection and update backend connection count
+  case TCP_STATE_FIN_BOTH:
+    if ((tcp->ack && !tcp->fin) || tcp->rst) {
+      struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
+      if (b) {
+        if (b->num_connections > 0) b->num_connections--;
+        bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
+      }
+      bpf_map_delete_elem(&statetrack, &five_tuple);
     }
-    bpf_map_delete_elem(&statetrack, &five_tuple);
+    return;
+
+  default:
+    return;
   }
 }
 
@@ -356,10 +364,10 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       backend = candidate_backend;
       bpf_printk("Selected backend with IP %pI4 with current number of connections equal to %d", &backend->endpoint.ip, backend->num_connections);
 
-      // Update the connection state
+      // Initialize the connection state on the TCP SYN packet from the client
       struct connection new_conn = {};
       new_conn.backend_index = key;
-      new_conn.state = TCP_STATE_SYN_SEEN;
+      new_conn.state = TCP_STATE_UNKNOWN;
       conn_ptr = &new_conn;
 
       // Store connection in the conntrack eBPF map (client -> backend)
