@@ -200,10 +200,8 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
 static __always_inline struct connection *update_conn_state(struct five_tuple_t *five_tuple,
                                                             struct connection *conn,
                                                             __u8 new_state) {
-  struct connection updated = *conn;
-  updated.state = new_state;
-
-  bpf_map_update_elem(&statetrack, five_tuple, &updated, BPF_ANY);
+  conn->state = new_state;
+  bpf_map_update_elem(&statetrack, five_tuple, conn, BPF_ANY);
   return bpf_map_lookup_elem(&statetrack, five_tuple);
 }
 
@@ -333,7 +331,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
     struct backend *backend;
     struct connection *conn_ptr;
-    struct connection new_conn = {};
     struct connection *conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
     if (conn) {
       // Existing connection found in statetrack map - update state and proceed with the same backend..
