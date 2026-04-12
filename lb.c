@@ -226,32 +226,30 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
 
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (b) {
-        struct backend updated = *b;
-        updated.num_connections++;
-        bpf_map_update_elem(&backends, &conn->backend_index, &updated, BPF_ANY);
+        // Increment the connection count for the selected backend
+        b.num_connections++;
+        bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
       }
     }
     return;
 
-  // From established state we need to see FINs from both sides
+  // From established connection we need to see FINs from both sides
   case TCP_STATE_ESTABLISHED:
   case TCP_STATE_FIN_FROM_CLIENT:
   case TCP_STATE_FIN_FROM_BACKEND:
-    if (tcp->fin) {
-      __u8 new_state;
-
-      if (direction == 0) {
-        new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
-                      ? TCP_STATE_FIN_BOTH
-                      : TCP_STATE_FIN_FROM_CLIENT;
-      } else {
-        new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
-                      ? TCP_STATE_FIN_BOTH
-                      : TCP_STATE_FIN_FROM_BACKEND;
-      }
-
-      conn = update_state(&five_tuple, conn, new_state);
+    if (!tcp->fin) return;
+    __u8 new_state;
+    if (direction == 0) {
+      new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
+                    ? TCP_STATE_FIN_BOTH
+                    : TCP_STATE_FIN_FROM_CLIENT;
+    } else {
+      new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
+                    ? TCP_STATE_FIN_BOTH
+                    : TCP_STATE_FIN_FROM_BACKEND;
     }
+
+    conn = update_state(&five_tuple, conn, new_state);
     return;
 
   // After FIN from both sides, we wait for the final ACK or RST to clean up the connection and update backend connection count
@@ -259,6 +257,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     if ((tcp->ack && !tcp->fin) || tcp->rst) {
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (b) {
+        // Decrement the connection count for the selected backend
         if (b->num_connections > 0) b->num_connections--;
         bpf_map_update_elem(&backends, &conn->backend_index, b, BPF_ANY);
         bpf_printk("Connection closed, backend %pI4 now has %d connections", &b->endpoint.ip, b->num_connections);
